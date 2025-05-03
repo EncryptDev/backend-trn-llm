@@ -17,6 +17,12 @@ from langchain_community.embeddings.sentence_transformer import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from TTS.api import TTS
+from fastapi.responses import Response
+from fastapi.responses import FileResponse
+from TTS.utils.synthesizer import Synthesizer
+import pyttsx3
+import tempfile
 
 
 # Suppress warnings
@@ -26,6 +32,10 @@ def warn(*args, **kwargs):
 
 warnings.warn = warn
 warnings.filterwarnings("ignore")
+
+os.environ["USERPROFILE"] = r"C:\Users\BAYUFP"
+os.environ["HOME"] = r"C:\Users\BAYUFP"
+os.environ["TTS_HOME"] = r"D:\Project\Python\backend-trn-llm\tts_models"
 
 # Inisialisasi FastAPI
 app = FastAPI()
@@ -37,11 +47,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Content-Type"],
-)
+)   
+
+@app.on_event("startup")
+def load_model():
+    global synthesizer
+    synthesizer = Synthesizer(
+        tts_checkpoint="checkpoint.pth",
+        tts_config_path="config.json",
+        use_cuda=False
+    )
 
 # Direktori penyimpanan dokumen
 UPLOAD_DIR = "./context/"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 
 # Load model embedding
 embeddings = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
@@ -79,6 +98,64 @@ qa_prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
+
+class TTSRequest(BaseModel):
+    text:str
+    rate:int = 150
+    volume: float = 1.0
+
+@app.post('/ttsx3')
+async def text_to_speech(request: TTSRequest):
+    try:
+        engine = pyttsx3.init()
+
+        engine.setProperty('rate', request.rate)
+        engine.setProperty('volume', request.volume)
+
+        voices = engine.getProperty("voices")
+        indonesian_voice = None
+
+        for voice in voices:
+            if "andika" in voice.name.lower():  # cari "Andika" secara spesifik
+                indonesian_voice = voice.id
+                break
+
+        if indonesian_voice:
+            engine.setProperty("voice", indonesian_voice)
+        else:
+            raise HTTPException(status_code=500, detail="Voice Bahasa Indonesia (Andika) tidak ditemukan.")
+
+        # Simpan TTS ke file sementara
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
+            temp_filename = tmp_file.name
+
+        engine.save_to_file(request.text, temp_filename)
+        engine.runAndWait()
+
+        with open(temp_filename, "rb") as audio_file:
+            audio_content = audio_file.read()
+
+        os.unlink(temp_filename)
+
+        return Response(
+            content=audio_content,
+            media_type="audio/mpeg",
+            headers={"Content-Disposition": "attachment; filename=tts_output.mp3"}
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS Error: {str(e)}")
+
+
+@app.get("/generate-tts")
+async def generate_tts(text: str, speaker: str = "wibowo"):
+    output_path = "output.wav"
+    
+    # Generate audio
+    wav = synthesizer.tts(text=text, speaker_name=speaker)
+    synthesizer.save_wav(wav, path=output_path)
+    
+    return FileResponse(output_path)
 
 # API untuk upload file
 @app.post("/upload/")
